@@ -26,6 +26,9 @@ import { awsRunInstancesUserData } from "./bootstrap";
 import {
   awsPromotedAMIConfigKey,
   awsInstanceTypeCandidatesForTargetClass,
+  awsInstanceTypeIsBareMetal,
+  awsInstanceTypeProvidesLinuxKVM,
+  awsNestedVirtualizationFallbackInstanceType,
   concreteStoredServerType,
   isCanonicalProviderClass,
   uniqueProviderMachineCandidates,
@@ -4549,8 +4552,9 @@ export function awsLaunchCandidates(
     LeaseConfig,
     "serverType" | "serverTypeExplicit" | "class" | "target" | "windowsMode" | "architecture"
   > &
-    Partial<Pick<LeaseConfig, "awsInstanceTypes">>,
+    Partial<Pick<LeaseConfig, "awsInstanceTypes" | "awsNestedVirtualization">>,
 ): string[] {
+  const nested = awsLinuxNestedVirtualization(config);
   const configuredInstanceTypes = config.awsInstanceTypes ?? [];
   if (configuredInstanceTypes.length > 0) {
     return uniqueStrings(configuredInstanceTypes);
@@ -4563,7 +4567,17 @@ export function awsLaunchCandidates(
     config.class,
     config.windowsMode,
     config.architecture,
+    nested,
   );
+  if (nested) {
+    const storedType = concreteStoredServerType(config.serverType, config.class);
+    const fallback = isCanonicalProviderClass(config.class)
+      ? []
+      : [awsNestedVirtualizationFallbackInstanceType];
+    return uniqueProviderMachineCandidates(
+      [storedType, ...profileCandidates, ...fallback].filter(awsInstanceTypeProvidesLinuxKVM),
+    );
+  }
   if (config.target === "macos" && !isCanonicalProviderClass(config.class)) {
     profileCandidates = uniqueProviderMachineCandidates([config.class, ...profileCandidates]);
   }
@@ -4636,11 +4650,22 @@ export function awsAvailabilityZoneForRegion(
 
 export function applyAWSRunInstanceTargetOptions(
   params: Record<string, string>,
-  config: Pick<LeaseConfig, "target" | "windowsMode">,
+  config: Pick<LeaseConfig, "target" | "windowsMode"> &
+    Partial<Pick<LeaseConfig, "serverType" | "awsNestedVirtualization">>,
 ): void {
-  if (config.target === "windows" && config.windowsMode === "wsl2") {
+  const wsl2 = config.target === "windows" && config.windowsMode === "wsl2";
+  // Bare-metal sizes already expose /dev/kvm and do not take the CPU option.
+  const linuxNested =
+    awsLinuxNestedVirtualization(config) && !awsInstanceTypeIsBareMetal(config.serverType ?? "");
+  if (wsl2 || linuxNested) {
     params["CpuOptions.NestedVirtualization"] = "enabled";
   }
+}
+
+function awsLinuxNestedVirtualization(
+  config: Pick<LeaseConfig, "target"> & Partial<Pick<LeaseConfig, "awsNestedVirtualization">>,
+): boolean {
+  return config.awsNestedVirtualization === true && config.target === "linux";
 }
 
 export function awsQuotaCodeForMarket(market: string): string {
@@ -4825,8 +4850,10 @@ function awsCapacityReadinessMessage(prefix: string, details: Record<string, str
 }
 
 function awsCapacityRecommendationCandidates(
-  config: Pick<LeaseConfig, "target" | "windowsMode" | "architecture">,
+  config: Pick<LeaseConfig, "target" | "windowsMode" | "architecture"> &
+    Partial<Pick<LeaseConfig, "awsNestedVirtualization">>,
 ): { machineClass: string; serverType: string }[] {
+  const nested = awsLinuxNestedVirtualization(config);
   const candidates: { machineClass: string; serverType: string }[] = [];
   for (const machineClass of ["beast", "large", "fast", "standard", "small", "tiny"]) {
     const [serverType] = awsInstanceTypeCandidatesForTargetClass(
@@ -4834,6 +4861,7 @@ function awsCapacityRecommendationCandidates(
       machineClass,
       config.windowsMode,
       config.architecture,
+      nested,
     );
     if (serverType) candidates.push({ machineClass, serverType });
   }
@@ -4842,6 +4870,7 @@ function awsCapacityRecommendationCandidates(
     "standard",
     config.windowsMode,
     config.architecture,
+    nested,
   )) {
     candidates.push({ machineClass: "standard", serverType });
   }
@@ -4849,7 +4878,8 @@ function awsCapacityRecommendationCandidates(
 }
 
 function awsRecommendedClassForQuota(
-  config: Pick<LeaseConfig, "target" | "windowsMode" | "architecture">,
+  config: Pick<LeaseConfig, "target" | "windowsMode" | "architecture"> &
+    Partial<Pick<LeaseConfig, "awsNestedVirtualization">>,
   limitVCPUs: number,
   vcpus: ReadonlyMap<string, number>,
 ): { machineClass: string; serverType: string } | undefined {
