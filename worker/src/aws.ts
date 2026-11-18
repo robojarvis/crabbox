@@ -5008,7 +5008,7 @@ export function isRetryableAWSProvisioningError(message: string): boolean {
 }
 
 export function isAWSInstanceNotFoundError(message: string): boolean {
-  return message.includes("InvalidInstanceID.NotFound");
+  return message.includes("InvalidInstanceID.NotFound") || message.includes("aws instance not found:");
 }
 
 export function isAWSManagedNodePendingError(message: string): boolean {
